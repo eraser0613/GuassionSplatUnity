@@ -1,0 +1,61 @@
+# Unity generated folders
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+
+# Unity generated files
+*.csproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Unity crash reports
+sysinfo.txt
+
+# IDE files
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local Claude settings
+Assets/.claude/settings.local.json
+.claude/settings.local.json
+
+# Python local files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Large generated Gaussian Splat assets
+Assets/GaussianAssets/*.bytes
+
+# Archives and build artifacts
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz

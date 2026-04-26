@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: f0af2ef608295a942bb5079265c07e31
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - targetCamera: {instanceID: 0}
+  - splatRenderer: {instanceID: 0}
+  - pickCompute: {fileID: 7200000, guid: eccfece2cfd6c604dae42b23e3dc1890, type: 3}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 

@@ -1,0 +1,76 @@
+#pragma kernel CSPickPixel
+#pragma use_dxc
+
+#include "Packages/org.nesnausk.gaussian-splatting/Shaders/GaussianSplatting.hlsl"
+#include "UnityCG.cginc"
+
+StructuredBuffer<SplatViewData> _SplatViewData;
+StructuredBuffer<uint> _OrderBuffer;
+RWStructuredBuffer<float4> _PickResult;
+
+float4x4 _MatrixObjectToWorld;
+float4 _VecScreenParams;
+float2 _PickPixel;
+float _PickAlphaThreshold;
+uint _SplatCount;
+
+bool SolveSplatLocalCoord(float2 deltaPx, float2 axis1, float2 axis2, out float2 q)
+{
+    float2 a = axis1 * 2.0;
+    float2 b = axis2 * 2.0;
+
+    float det = a.x * b.y - a.y * b.x;
+    if (abs(det) < 1e-6)
+    {
+        q = 0;
+        return false;
+    }
+
+    float invDet = 1.0 / det;
+    q.x = ( deltaPx.x * b.y - deltaPx.y * b.x) * invDet;
+    q.y = (-deltaPx.x * a.y + deltaPx.y * a.x) * invDet;
+    return true;
+}
+
+[numthreads(1,1,1)]
+void CSPickPixel(uint3 id : SV_DispatchThreadID)
+{
+    _PickResult[0] = float4(0,0,0,0);
+
+    float accumA = 0.0;
+
+    for (uint sortedIdx = 0; sortedIdx < _SplatCount; ++sortedIdx)
+    {
+        uint idx = _OrderBuffer[sortedIdx];
+        SplatViewData view = _SplatViewData[idx];
+
+        if (view.pos.w <= 0)
+            continue;
+
+        float2 centerNdc = view.pos.xy / view.pos.w;
+        float2 centerPx = (centerNdc * float2(0.5, -0.5) + 0.5) * _VecScreenParams.xy;
+        float2 deltaPx = _PickPixel - centerPx;
+
+        float2 q;
+        if (!SolveSplatLocalCoord(deltaPx, view.axis1, view.axis2, q))
+            continue;
+
+        float power = -dot(q, q);
+
+        float baseAlpha = f16tof32(view.color.y & 0xFFFF);
+        float alpha = saturate(exp(power) * baseAlpha);
+
+        if (alpha < (1.0 / 255.0))
+            continue;
+
+        accumA += (1.0 - accumA) * alpha;
+
+        if (accumA >= _PickAlphaThreshold)
+        {
+            float ndcDepth = view.pos.z / view.pos.w;
+            _PickResult[0] = float4(_PickPixel.x, _PickPixel.y, ndcDepth, 1);
+            return;
+            
+        }
+    }
+}
