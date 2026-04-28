@@ -7,17 +7,44 @@
 StructuredBuffer<SplatViewData> _SplatViewData;
 StructuredBuffer<uint> _OrderBuffer;
 RWStructuredBuffer<float4> _PickResult;
+RWStructuredBuffer<float4> _PickCandidates;
 
 float4x4 _MatrixObjectToWorld;
 float4 _VecScreenParams;
+float3 _CameraWorldPos;
+float3 _CameraForward;
 float2 _PickPixel;
-float _PickAlphaThreshold;
+float _PickAlphaCutoff;
+float _PickSurfaceAlpha;
+uint _PickFlipY;
 uint _SplatCount;
+uint _NeighborhoodRadius;
+uint _MaxDebugCandidates;
+
+struct CandidatePick
+{
+    float3 surfaceWorld;
+    float3 splatCenterWorld;
+    float2 pixel;
+    float2 q;
+    uint splatIndex;
+    uint sortedIndex;
+    int selectedCandidateOrdinal;
+    uint totalCandidateCount;
+    float surfaceDepth;
+    float splatDepth;
+    float alpha;
+    float contribution;
+    float contributionSum;
+    float accumulatedAlpha;
+    float confidence;
+    float power;
+};
 
 bool SolveSplatLocalCoord(float2 deltaPx, float2 axis1, float2 axis2, out float2 q)
 {
-    float2 a = axis1 * 2.0;
-    float2 b = axis2 * 2.0;
+    float2 a = axis1;
+    float2 b = axis2;
 
     float det = a.x * b.y - a.y * b.x;
     if (abs(det) < 1e-6)
@@ -32,45 +59,187 @@ bool SolveSplatLocalCoord(float2 deltaPx, float2 axis1, float2 axis2, out float2
     return true;
 }
 
-[numthreads(1,1,1)]
-void CSPickPixel(uint3 id : SV_DispatchThreadID)
+void ClearPickResult()
 {
-    _PickResult[0] = float4(0,0,0,0);
+    _PickResult[0] = float4(0, 0, 0, 0);
+    _PickResult[1] = float4(-1, -1, _PickPixel.x, _PickPixel.y);
+    _PickResult[2] = float4(0, 0, 0, 0);
+    _PickResult[3] = float4(0, 0, 0, 0);
+    _PickResult[4] = float4(0, 0, 0, 0);
+}
 
+void ClearDebugCandidates()
+{
+    _PickCandidates[0] = float4(0, -1, _PickSurfaceAlpha, 0);
+}
+
+bool IsInPickBounds(float2 pixel)
+{
+    return pixel.x >= 0.0 && pixel.y >= 0.0 && pixel.x < _VecScreenParams.x && pixel.y < _VecScreenParams.y;
+}
+
+void RecordDebugCandidate(uint ordinal, uint splatIndex, uint sortedIndex, float3 centerWorld, float linearDepth,
+                          float alpha, float contribution, float accumBefore, float accumAfter,
+                          float usedContribution, float2 q, float power)
+{
+    uint baseIndex = 1 + ordinal * 4;
+    _PickCandidates[baseIndex + 0] = float4(centerWorld, (float)splatIndex);
+    _PickCandidates[baseIndex + 1] = float4((float)sortedIndex, linearDepth, alpha, contribution);
+    _PickCandidates[baseIndex + 2] = float4(accumBefore, accumAfter, usedContribution, contribution / max(accumAfter, 1e-5));
+    _PickCandidates[baseIndex + 3] = float4(q.x, q.y, power, 0);
+}
+
+bool EvaluateCandidatePixel(float2 candidatePixel, bool recordCandidates, out CandidatePick best)
+{
+    best = (CandidatePick)0;
+    best.pixel = candidatePixel;
+    best.selectedCandidateOrdinal = -1;
+
+    if (!IsInPickBounds(candidatePixel))
+        return false;
+
+    bool found = false;
     float accumA = 0.0;
+    float contributionSum = 0.0;
+    float weightedLinearDepthSum = 0.0;
+    float targetSurfaceAlpha = clamp(_PickSurfaceAlpha, _PickAlphaCutoff, 0.999);
+    uint candidateCount = 0;
+    uint maxDebugCandidates = max(_MaxDebugCandidates, 1u);
 
     for (uint sortedIdx = 0; sortedIdx < _SplatCount; ++sortedIdx)
     {
         uint idx = _OrderBuffer[sortedIdx];
         SplatViewData view = _SplatViewData[idx];
 
-        if (view.pos.w <= 0)
+        if (view.pos.w <= 0.0)
             continue;
 
         float2 centerNdc = view.pos.xy / view.pos.w;
-        float2 centerPx = (centerNdc * float2(0.5, -0.5) + 0.5) * _VecScreenParams.xy;
-        float2 deltaPx = _PickPixel - centerPx;
+        float2 axis1 = view.axis1;
+        float2 axis2 = view.axis2;
+        if (_PickFlipY != 0)
+        {
+            centerNdc.y = -centerNdc.y;
+            axis1.y = -axis1.y;
+            axis2.y = -axis2.y;
+        }
+        float2 centerPx = (centerNdc * 0.5 + 0.5) * _VecScreenParams.xy;
+        float2 deltaPx = candidatePixel - centerPx;
 
         float2 q;
-        if (!SolveSplatLocalCoord(deltaPx, view.axis1, view.axis2, q))
+        if (!SolveSplatLocalCoord(deltaPx, axis1, axis2, q))
             continue;
 
         float power = -dot(q, q);
-
         float baseAlpha = f16tof32(view.color.y & 0xFFFF);
         float alpha = saturate(exp(power) * baseAlpha);
 
-        if (alpha < (1.0 / 255.0))
+        if (alpha < _PickAlphaCutoff)
             continue;
 
-        accumA += (1.0 - accumA) * alpha;
+        float accumBefore = accumA;
+        float contribution = (1.0 - accumA) * alpha;
+        float usedContribution = min(contribution, max(targetSurfaceAlpha - accumA, 0.0));
+        float depth = view.pos.z / view.pos.w;
+        float3 localPos = LoadSplatPos(idx);
+        float3 centerWorld = mul(_MatrixObjectToWorld, float4(localPos, 1.0)).xyz;
+        float linearDepth = dot(centerWorld - _CameraWorldPos, _CameraForward);
+        float accumAfter = accumA + contribution;
 
-        if (accumA >= _PickAlphaThreshold)
+        if (recordCandidates && candidateCount < maxDebugCandidates)
         {
-            float ndcDepth = view.pos.z / view.pos.w;
-            _PickResult[0] = float4(_PickPixel.x, _PickPixel.y, ndcDepth, 1);
-            return;
-            
+            RecordDebugCandidate(candidateCount, idx, sortedIdx, centerWorld, linearDepth, alpha, contribution,
+                                 accumBefore, accumAfter, usedContribution, q, power);
+        }
+
+        weightedLinearDepthSum += linearDepth * usedContribution;
+        contributionSum += usedContribution;
+
+        if (usedContribution > 0.0 && contribution > best.contribution)
+        {
+            best.splatCenterWorld = centerWorld;
+            best.q = q;
+            best.splatIndex = idx;
+            best.sortedIndex = sortedIdx;
+            best.selectedCandidateOrdinal = candidateCount < maxDebugCandidates ? (int)candidateCount : -1;
+            best.splatDepth = depth;
+            best.alpha = alpha;
+            best.contribution = contribution;
+            best.power = power;
+            found = true;
+        }
+
+        candidateCount++;
+        accumA = accumAfter;
+        if (recordCandidates)
+        {
+            if (candidateCount >= maxDebugCandidates || accumA >= 0.995)
+                break;
+        }
+        else if (accumA >= targetSurfaceAlpha)
+        {
+            break;
         }
     }
+
+    best.totalCandidateCount = candidateCount;
+
+    if (found && contributionSum > 1e-5)
+    {
+        float linearDepth = weightedLinearDepthSum / contributionSum;
+        best.surfaceWorld = _CameraWorldPos + _CameraForward * linearDepth;
+        best.surfaceDepth = linearDepth;
+        best.contributionSum = contributionSum;
+        best.accumulatedAlpha = accumA;
+        best.confidence = best.contribution / max(accumA, 1e-5);
+    }
+
+    if (recordCandidates)
+        _PickCandidates[0] = float4((float)candidateCount, (float)best.selectedCandidateOrdinal, targetSurfaceAlpha, contributionSum);
+
+    return found;
+}
+
+[numthreads(1,1,1)]
+void CSPickPixel(uint3 id : SV_DispatchThreadID)
+{
+    ClearPickResult();
+    ClearDebugCandidates();
+
+    CandidatePick best;
+    bool found = EvaluateCandidatePixel(_PickPixel, false, best);
+
+    if (!found)
+    {
+        int radius = min((int)_NeighborhoodRadius, 4);
+        for (int oy = -radius; oy <= radius; ++oy)
+        {
+            for (int ox = -radius; ox <= radius; ++ox)
+            {
+                if (ox == 0 && oy == 0)
+                    continue;
+
+                CandidatePick candidate;
+                if (!EvaluateCandidatePixel(_PickPixel + float2(ox, oy), false, candidate))
+                    continue;
+
+                if (!found || candidate.contribution > best.contribution)
+                {
+                    best = candidate;
+                    found = true;
+                }
+            }
+        }
+    }
+
+    if (!found)
+        return;
+
+    EvaluateCandidatePixel(best.pixel, true, best);
+
+    _PickResult[0] = float4(best.surfaceWorld, 1.0);
+    _PickResult[1] = float4((float)best.splatIndex, (float)best.sortedIndex, best.pixel.x, best.pixel.y);
+    _PickResult[2] = float4(best.alpha, best.contribution, best.accumulatedAlpha, best.confidence);
+    _PickResult[3] = float4(best.surfaceDepth, best.splatDepth, best.contributionSum, best.power);
+    _PickResult[4] = float4(best.splatCenterWorld, 1.0);
 }

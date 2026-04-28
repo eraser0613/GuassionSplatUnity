@@ -10,6 +10,7 @@ public class ApproxGsMeasureTool : MonoBehaviour
     public GaussianSplatRenderer splatRenderer;
     public LineRenderer lineRenderer;
     public GsPixelPicker picker;
+    public GSViewerUI viewerUI;
 
     [Header("Fallback Picking")]
     public bool preferChunkBounds = true;
@@ -45,6 +46,9 @@ public class ApproxGsMeasureTool : MonoBehaviour
         if (targetCamera == null)
             targetCamera = Camera.main;
 
+        if (viewerUI == null)
+            viewerUI = FindObjectOfType<GSViewerUI>();
+
         if (lineRenderer != null)
         {
             lineRenderer.positionCount = 0;
@@ -56,7 +60,7 @@ public class ApproxGsMeasureTool : MonoBehaviour
 
     void Update()
     {
-        if (Input.GetMouseButtonDown(0))
+        if (Input.GetMouseButtonDown(0) && viewerUI != null && viewerUI.IsPickMode)
             TryPick();
 
         if (Input.GetKeyDown(KeyCode.R))
@@ -128,10 +132,13 @@ public class ApproxGsMeasureTool : MonoBehaviour
         bool ok = false;
         Vector3 hitWorld = Vector3.zero;
 
-        // 1) 优先使用新的像素级 picker
+        // 1) 优先使用与渲染贡献一致的像素级 picker
         if (picker != null)
         {
-            ok = picker.TryPick(Input.mousePosition, out hitWorld);
+            ok = picker.TryPickDetailed(Input.mousePosition, out GsPixelPicker.PickResult pick);
+            hitWorld = pick.worldPosition;
+            if (ok)
+                Debug.Log($"Accurate pick: {pick.diagnostic}");
         }
 
         // 2) 如果 picker 失败，按需退回旧的 bounds/chunk picking
@@ -317,12 +324,31 @@ public class ApproxGsMeasureTool : MonoBehaviour
             Renderer mr = marker.GetComponent<Renderer>();
             if (mr != null)
             {
-                mr.material = new Material(Shader.Find("Standard"));
-                mr.material.color = color;
+                Material material = CreateColorMaterial(color);
+                if (material != null)
+                    mr.material = material;
             }
         }
 
         marker.transform.position = pos;
+    }
+
+    Material CreateColorMaterial(Color color)
+    {
+        Shader shader = Shader.Find("Sprites/Default");
+        if (shader == null)
+            shader = Shader.Find("UI/Default");
+        if (shader == null)
+            shader = Shader.Find("Hidden/Internal-Colored");
+        if (shader == null)
+            shader = Shader.Find("Standard");
+
+        if (shader == null)
+            return null;
+
+        Material material = new Material(shader);
+        material.color = color;
+        return material;
     }
 
     public void ResetMeasurement()
